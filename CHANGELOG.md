@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-05-10
+
+### Added
+- Added a no-argument `/mcp-auth` OAuth picker and in-panel auth shortcut for OAuth-capable MCP servers.
+- Added compact collapsed rendering for MCP proxy and direct-tool result rows while keeping full tool results available when expanded.
+
+### Changed
+- Migrated Pi runtime dependencies and imports from deprecated `@mariozechner/*` packages to `@earendil-works/*` packages.
+
+### Fixed
+- Re-register dynamic OAuth clients during fresh auth when cached DCR client info exists without tokens, avoiding dead authorization URLs after server-side client invalidation.
+
 ## [2.5.4] - 2026-05-04
 
 ### Changed
