@@ -6,6 +6,19 @@ type McpToolContentBlock = AgentToolResult<McpToolResultDetails>["content"][numb
 
 interface RenderTheme {
   fg: (name: string, text: string) => string;
+  bold?: (text: string) => string;
+}
+
+export interface McpProxyToolCallInput {
+  tool?: string;
+  args?: string;
+  connect?: string;
+  describe?: string;
+  search?: string;
+  regex?: boolean;
+  includeSchemas?: boolean;
+  server?: string;
+  action?: string;
 }
 
 interface McpToolRenderContext {
@@ -15,6 +28,87 @@ interface McpToolRenderContext {
 export interface McpToolResultDisplay {
   lines: string[];
   truncated: boolean;
+}
+
+const DEFAULT_MAX_CALL_INPUT_CHARS = 1500;
+
+function truncateText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+function formatJsonish(value: unknown, maxChars: number): string {
+  if (typeof value === "string") {
+    try {
+      return truncateText(JSON.stringify(JSON.parse(value), null, 2), maxChars);
+    } catch {
+      return truncateText(value, maxChars);
+    }
+  }
+
+  try {
+    return truncateText(JSON.stringify(value, null, 2), maxChars);
+  } catch {
+    return truncateText(String(value), maxChars);
+  }
+}
+
+function hasUsefulObjectContent(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length > 0;
+}
+
+export function formatMcpProxyToolCallLines(
+  args: McpProxyToolCallInput,
+  maxInputChars = DEFAULT_MAX_CALL_INPUT_CHARS,
+): string[] {
+  if (args.tool) {
+    const target = args.server ? `${args.tool} @ ${args.server}` : args.tool;
+    const lines = [`mcp call ${target}`];
+    if (args.args) lines.push(formatJsonish(args.args, maxInputChars));
+    return lines;
+  }
+
+  if (args.connect) return [`mcp connect ${args.connect}`];
+  if (args.describe) return [`mcp describe ${args.describe}`];
+
+  if (args.search) {
+    let line = `mcp search ${args.search}`;
+    if (args.server) line += ` @ ${args.server}`;
+    if (args.regex === true) line += " (regex)";
+    if (args.includeSchemas === false) line += " (schemas hidden)";
+    return [line];
+  }
+
+  if (args.server) return [`mcp list ${args.server}`];
+  if (args.action) return [`mcp ${args.action}`];
+
+  return ["mcp status"];
+}
+
+export function formatMcpDirectToolCallLines(
+  displayName: string,
+  args: Record<string, unknown>,
+  maxInputChars = DEFAULT_MAX_CALL_INPUT_CHARS,
+): string[] {
+  if (!hasUsefulObjectContent(args)) return [displayName];
+  return [displayName, formatJsonish(args, maxInputChars)];
+}
+
+function renderToolCallLines(lines: string[], theme: RenderTheme) {
+  const [title = "mcp", ...rest] = lines;
+  const styledTitle = theme.fg("toolTitle", theme.bold ? theme.bold(title) : title);
+  const styledRest = rest.map(line => theme.fg("muted", line));
+  return new Text([styledTitle, ...styledRest].join("\n"), 0, 0);
+}
+
+export function renderMcpProxyToolCall(args: McpProxyToolCallInput, theme: RenderTheme) {
+  return renderToolCallLines(formatMcpProxyToolCallLines(args), theme);
+}
+
+export function createMcpDirectToolCallRenderer(displayName: string) {
+  return (args: Record<string, unknown>, theme: RenderTheme) => {
+    return renderToolCallLines(formatMcpDirectToolCallLines(displayName, args), theme);
+  };
 }
 
 function blockToLines(block: McpToolContentBlock): string[] {

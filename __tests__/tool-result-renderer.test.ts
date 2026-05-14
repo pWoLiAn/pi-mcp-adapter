@@ -1,6 +1,11 @@
 import type { AgentToolResult, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { formatMcpToolResultLines, renderMcpToolResult } from "../tool-result-renderer.ts";
+import {
+  formatMcpDirectToolCallLines,
+  formatMcpProxyToolCallLines,
+  formatMcpToolResultLines,
+  renderMcpToolResult,
+} from "../tool-result-renderer.ts";
 
 type TestDetails = Record<string, unknown> & { error?: unknown };
 type TestResult = AgentToolResult<TestDetails>;
@@ -11,6 +16,46 @@ const plainTheme = { fg: (_name: string, text: string) => text };
 function result(content: TestResult["content"], details: TestDetails = {}): TestResult {
   return { content, details };
 }
+
+describe("MCP tool call renderer", () => {
+  it("shows proxy tool calls with parsed JSON arguments", () => {
+    const display = formatMcpProxyToolCallLines({
+      tool: "cf-portal_list_worker_tail_events",
+      server: "cf-portal",
+      args: JSON.stringify({ accountId: "abc", scriptName: "worker" }),
+    });
+
+    expect(display).toEqual([
+      "mcp call cf-portal_list_worker_tail_events @ cf-portal",
+      '{\n  "accountId": "abc",\n  "scriptName": "worker"\n}',
+    ]);
+  });
+
+  it("shows proxy discovery operations", () => {
+    expect(formatMcpProxyToolCallLines({ search: "tail events", server: "cf-portal", regex: true })).toEqual([
+      "mcp search tail events @ cf-portal (regex)",
+    ]);
+    expect(formatMcpProxyToolCallLines({ connect: "cf-portal" })).toEqual(["mcp connect cf-portal"]);
+    expect(formatMcpProxyToolCallLines({ server: "cf-portal" })).toEqual(["mcp list cf-portal"]);
+    expect(formatMcpProxyToolCallLines({})).toEqual(["mcp status"]);
+  });
+
+  it("shows direct tool calls with JSON arguments", () => {
+    const display = formatMcpDirectToolCallLines("cf-portal_list_worker_tail_events", {
+      accountId: "abc",
+      scriptName: "worker",
+    });
+
+    expect(display).toEqual([
+      "cf-portal_list_worker_tail_events",
+      '{\n  "accountId": "abc",\n  "scriptName": "worker"\n}',
+    ]);
+  });
+
+  it("omits empty direct tool arguments", () => {
+    expect(formatMcpDirectToolCallLines("cf-portal_status", {})).toEqual(["cf-portal_status"]);
+  });
+});
 
 describe("MCP tool result renderer", () => {
   it("shows the first three lines and an ellipsis for collapsed long text", () => {
