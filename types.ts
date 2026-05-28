@@ -313,6 +313,8 @@ export interface ServerEntry {
   directTools?: boolean | string[];
   // Exclude specific MCP tools/resources by original or prefixed name
   excludeTools?: string[];
+  // Per-server tool call timeout in seconds (default: 60)
+  timeout?: number;
   // Debug
   debug?: boolean;  // Show server stderr (default: false)
 }
