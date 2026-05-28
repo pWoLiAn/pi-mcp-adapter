@@ -430,7 +430,7 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
 
   try {
     if (state.ui) {
-      state.ui.setStatus("mcp", `MCP: connecting to ${serverName}...`);
+      state.ui.setStatus("mcp", state.ui.theme.fg("muted", "🔌:") + state.ui.theme.fg("accent", `connecting ${serverName}`));
     }
     let connection = await state.manager.connect(serverName, definition);
     if (connection.status === "needs-auth") {
@@ -666,7 +666,7 @@ export async function executeCall(
 
     try {
       if (state.ui) {
-        state.ui.setStatus("mcp", `MCP: connecting to ${serverName}...`);
+        state.ui.setStatus("mcp", state.ui.theme.fg("muted", "🔌:") + state.ui.theme.fg("accent", `connecting ${serverName}`));
       }
       connection = await state.manager.connect(serverName, definition);
       if (connection.status === "needs-auth") {
@@ -751,7 +751,7 @@ export async function executeCall(
       name: toolMeta.originalName,
       arguments: args ?? {},
       _meta: uiSession?.requestMeta,
-    });
+    }, undefined, { timeout: (state.config.mcpServers[serverName]?.timeout ?? 60) * 1000 });
 
     if (toolMeta.uiResourceUri) {
       const result = await resultPromise;

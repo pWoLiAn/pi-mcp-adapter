@@ -367,11 +367,12 @@ export function createDirectToolExecutor(
           })
         : null;
 
+      const serverTimeout = (state.config.mcpServers[spec.serverName]?.timeout ?? 60) * 1000;
       const resultPromise = connection.client.callTool({
         name: spec.originalName,
         arguments: params ?? {},
         _meta: uiSession?.requestMeta,
-      });
+      }, undefined, { timeout: serverTimeout });
 
       const result = await resultPromise;
       uiSession?.sendToolResult(result as unknown as import("@modelcontextprotocol/sdk/types.js").CallToolResult);
