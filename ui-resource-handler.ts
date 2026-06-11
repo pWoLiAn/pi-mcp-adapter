@@ -1,5 +1,5 @@
 import { RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/app-bridge";
-import type { ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
+import { UrlElicitationRequiredError, type ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
 import { ResourceFetchError, ResourceParseError } from "./errors.ts";
 import { logger } from "./logger.ts";
 import type { McpServerManager } from "./server-manager.ts";
@@ -18,7 +18,7 @@ export class UiResourceHandler {
 
   constructor(private manager: McpServerManager) {}
 
-  async readUiResource(serverName: string, uri: string): Promise<UiResourceContent> {
+  async readUiResource(serverName: string, uri: string, signal?: AbortSignal): Promise<UiResourceContent> {
     const log = this.log.child({ server: serverName, uri });
 
     if (!uri.startsWith("ui://")) {
@@ -29,8 +29,10 @@ export class UiResourceHandler {
 
     let result: ReadResourceResult;
     try {
-      result = await this.manager.readResource(serverName, uri);
+      result = await this.manager.readResource(serverName, uri, signal);
     } catch (error) {
+      // Preserve this typed response so the outer tool adapter can run URL elicitation.
+      if (error instanceof UrlElicitationRequiredError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       log.error("Failed to read resource", error instanceof Error ? error : undefined);
       throw new ResourceFetchError(uri, message, {

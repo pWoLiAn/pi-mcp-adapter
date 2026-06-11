@@ -93,6 +93,23 @@ export function resolveBearerToken(definition: Pick<ServerEntry, "bearerToken" |
   return definition.bearerTokenEnv ? process.env[definition.bearerTokenEnv] : undefined;
 }
 
+export function waitForAbortSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => { cleanup(); resolve(value); },
+      (error) => { cleanup(); reject(error); },
+    );
+  });
+}
+
 export function truncateAtWord(text: string, target: number): string {
   if (!text || text.length <= target) return text;
 

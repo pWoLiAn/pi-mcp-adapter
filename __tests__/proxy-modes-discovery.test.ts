@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { executeCall, executeSearch } from "../proxy-modes.ts";
+import { assertSuccessfulProxyResult, executeCall, executeSearch } from "../proxy-modes.ts";
 import type { McpExtensionState } from "../state.ts";
 
 function createState(): McpExtensionState {
@@ -43,10 +43,11 @@ describe("proxy discovery", () => {
     expect(result.details).toMatchObject({ error: "query_too_long", maxLength: 256 });
   });
 
-  it("reports malformed regex queries separately from unsafe patterns", () => {
+  it("reports malformed regex queries separately and marks them as Pi failures at the tool boundary", () => {
     const result = executeSearch(createState(), "[", true);
 
     expect(result.details).toMatchObject({ error: "invalid_pattern" });
+    expect(() => assertSuccessfulProxyResult(result)).toThrow("Invalid regex");
   });
 
   it("rejects catastrophic-backtracking regex queries", () => {
@@ -67,18 +68,15 @@ describe("proxy discovery", () => {
     expect(result.details).not.toMatchObject({ error: "query_too_long" });
   });
 
-  it("tells callers to invoke native Pi tools directly", async () => {
-    const result = await executeCall(
+  it("marks accidental proxy calls to native Pi tools as failures", async () => {
+    await expect(executeCall(
       createState(),
       "read",
       undefined,
       undefined,
       () => [{ name: "read", description: "Read a file" } as any],
-    );
-
-    expect(result.content[0].text).toBe(
+    )).rejects.toThrow(
       '"read" is a native Pi tool. Call read directly instead of using mcp({ tool: "read" }).',
     );
-    expect(result.details).toMatchObject({ error: "native_tool", requestedTool: "read" });
   });
 });

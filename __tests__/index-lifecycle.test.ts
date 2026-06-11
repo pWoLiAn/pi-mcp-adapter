@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   executeUiMessages: vi.fn(),
   getConfigPathFromArgv: vi.fn(() => undefined),
   truncateAtWord: vi.fn((text: string) => text),
+  waitForAbortSignal: vi.fn((promise: Promise<unknown>) => promise),
 }));
 
 vi.mock("../init.ts", () => ({
@@ -81,6 +82,7 @@ vi.mock("../proxy-modes.ts", () => ({
 vi.mock("../utils.ts", () => ({
   getConfigPathFromArgv: mocks.getConfigPathFromArgv,
   truncateAtWord: mocks.truncateAtWord,
+  waitForAbortSignal: mocks.waitForAbortSignal,
 }));
 
 function createDeferred<T>() {
@@ -144,6 +146,7 @@ describe("mcpAdapter session lifecycle", () => {
     mocks.resolveDirectTools.mockReturnValue([]);
     mocks.getConfigPathFromArgv.mockReturnValue(undefined);
     mocks.truncateAtWord.mockImplementation((text: string) => text);
+    mocks.waitForAbortSignal.mockImplementation((promise: Promise<unknown>) => promise);
   });
 
   afterEach(() => {
@@ -250,6 +253,27 @@ describe("mcpAdapter session lifecycle", () => {
     expect(mocks.updateStatusBar).not.toHaveBeenCalledWith(staleState);
     expect(mocks.flushMetadataCache).toHaveBeenCalledWith(staleState);
     expect(staleState.lifecycle.gracefulShutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts and closes an initialization manager before initialization resolves", async () => {
+    const pending = createDeferred<any>();
+    const manager = { closeAll: vi.fn().mockResolvedValue(undefined) };
+    let initializationSignal: AbortSignal | undefined;
+    mocks.initializeMcp.mockImplementation((_pi, _ctx, options) => {
+      initializationSignal = options.signal;
+      options.onManager(manager);
+      return pending.promise;
+    });
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    expect(initializationSignal?.aborted).toBe(false);
+
+    await handlers.get("session_shutdown")?.({}, {});
+    expect(initializationSignal?.aborted).toBe(true);
+    expect(manager.closeAll).toHaveBeenCalledTimes(1);
   });
 
   it("shuts down OAuth on session_shutdown", async () => {

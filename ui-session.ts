@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { UrlElicitationRequiredError, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { McpExtensionState } from "./state.ts";
 import {
   extractUiPromptText,
@@ -90,6 +90,7 @@ async function openInBrowser(state: McpExtensionState, url: string): Promise<voi
 export async function maybeStartUiSession(
   state: McpExtensionState,
   request: UiSessionRequest,
+  signal?: AbortSignal,
 ): Promise<UiSessionRuntime | null> {
   const log = logger.child({
     component: "UiSession",
@@ -170,7 +171,7 @@ export async function maybeStartUiSession(
       };
     }
 
-    const resource = await state.uiResourceHandler.readUiResource(request.serverName, request.uiResourceUri);
+    const resource = await state.uiResourceHandler.readUiResource(request.serverName, request.uiResourceUri, signal);
 
     if (state.uiServer) {
       state.uiServer.close("replaced");
@@ -373,6 +374,9 @@ export async function maybeStartUiSession(
       },
     };
   } catch (error) {
+    if (error instanceof UrlElicitationRequiredError || signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw error;
+    }
     const message = error instanceof Error ? error.message : String(error);
     log.error("Failed to start UI session", error instanceof Error ? error : undefined);
     state.ui?.notify(

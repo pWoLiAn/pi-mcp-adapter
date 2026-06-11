@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { initializeMcp } from "../init.ts";
+import { initializeMcp, isLocalTuiExecution } from "../init.ts";
 
 const mocks = vi.hoisted(() => ({
   loadMcpConfig: vi.fn(),
@@ -33,14 +33,35 @@ describe("initializeMcp elicitation config", () => {
     await initializeMcp({ getFlag: vi.fn() } as any, {
       cwd: "/tmp/project",
       hasUI: true,
+      mode: "tui",
       ui,
       modelRegistry: {},
     } as any);
 
     expect(mocks.managers[0].setElicitationConfig).toHaveBeenCalledWith({
       ui,
-      autoOpenUrls: false,
+      allowUrl: true,
     });
+  });
+
+  it("keeps form elicitation but disables backend URL navigation in RPC mode", async () => {
+    const ui = { select: vi.fn(), input: vi.fn(), notify: vi.fn() };
+    await initializeMcp({ getFlag: vi.fn() } as any, {
+      cwd: "/tmp/project",
+      hasUI: true,
+      mode: "rpc",
+      ui,
+      modelRegistry: {},
+    } as any);
+
+    expect(mocks.managers[0].setElicitationConfig).toHaveBeenCalledWith({ ui, allowUrl: false });
+  });
+
+  it("detects RPC from the real CLI arguments when Pi omits ctx.mode", () => {
+    expect(isLocalTuiExecution({ hasUI: true } as any, ["node", "pi", "--mode", "rpc"], true)).toBe(false);
+    expect(isLocalTuiExecution({ hasUI: true } as any, ["node", "pi", "--mode=rpc"], true)).toBe(false);
+    expect(isLocalTuiExecution({ hasUI: true } as any, ["node", "pi"], true)).toBe(true);
+    expect(isLocalTuiExecution({ hasUI: true } as any, ["node", "pi"], false)).toBe(false);
   });
 
   it("does not enable elicitation without UI or when disabled in settings", async () => {

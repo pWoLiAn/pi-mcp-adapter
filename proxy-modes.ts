@@ -1,4 +1,5 @@
 import type { AgentToolResult, ToolInfo } from "@earendil-works/pi-coding-agent";
+import { UrlElicitationRequiredError } from "@modelcontextprotocol/sdk/types.js";
 import { checkSync } from "recheck";
 import type { McpExtensionState } from "./state.ts";
 import type { ToolMetadata, McpContent } from "./types.ts";
@@ -11,6 +12,17 @@ import { formatAuthRequiredMessage, truncateAtWord } from "./utils.ts";
 import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
 
 type ProxyToolResult = AgentToolResult<Record<string, unknown>>;
+
+export function assertSuccessfulProxyResult(result: ProxyToolResult): ProxyToolResult {
+  if (result.details && typeof result.details === "object" && "error" in result.details) {
+    const message = result.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("\n") || "MCP operation failed";
+    throw new Error(message);
+  }
+  return result;
+}
 
 const MAX_REGEX_SEARCH_QUERY_LENGTH = 256;
 const REGEX_SAFETY_CHECK_PARAMS = {
@@ -419,39 +431,28 @@ export function executeList(state: McpExtensionState, server: string): ProxyTool
   };
 }
 
-export async function executeConnect(state: McpExtensionState, serverName: string): Promise<ProxyToolResult> {
+export async function executeConnect(state: McpExtensionState, serverName: string, signal?: AbortSignal): Promise<ProxyToolResult> {
+  const result = await executeConnectInternal(state, serverName, signal);
+  return assertSuccessfulProxyResult(result);
+}
+
+async function executeConnectInternal(state: McpExtensionState, serverName: string, signal?: AbortSignal): Promise<ProxyToolResult> {
   const definition = state.config.mcpServers[serverName];
-  if (!definition) {
-    return {
-      content: [{ type: "text" as const, text: `Server "${serverName}" not found. Use mcp({}) to see available servers.` }],
-      details: { mode: "connect", error: "not_found", server: serverName },
-    };
-  }
+  if (!definition) throw new Error(`Server "${serverName}" not found. Use mcp({}) to see available servers.`);
 
   try {
     if (state.ui) {
       state.ui.setStatus("mcp", `MCP: connecting to ${serverName}...`);
     }
-    let connection = await state.manager.connect(serverName, definition);
+    let connection = await state.manager.connect(serverName, definition, signal);
     if (connection.status === "needs-auth") {
       const autoAuth = await attemptAutoAuth(state, serverName);
-      if (autoAuth.status === "failed") {
-        return {
-          content: [{ type: "text" as const, text: autoAuth.message }],
-          details: { mode: "connect", error: "auth_required", server: serverName, message: autoAuth.message },
-        };
-      }
+      if (autoAuth.status === "failed") throw new Error(autoAuth.message);
       if (autoAuth.status === "success") {
         await state.manager.close(serverName);
-        connection = await state.manager.connect(serverName, definition);
+        connection = await state.manager.connect(serverName, definition, signal);
       }
-      if (connection.status === "needs-auth") {
-        const message = getAuthRequiredMessage(state, serverName);
-        return {
-          content: [{ type: "text" as const, text: message }],
-          details: { mode: "connect", error: "auth_required", server: serverName, message },
-        };
-      }
+      if (connection.status === "needs-auth") throw new Error(getAuthRequiredMessage(state, serverName));
     }
     const prefix = state.config.settings?.toolPrefix ?? "server";
     const { metadata } = buildToolMetadata(connection.tools, connection.resources, definition, serverName, prefix);
@@ -464,10 +465,7 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
     state.failureTracker.set(serverName, Date.now());
     updateStatusBar(state);
     const message = error instanceof Error ? error.message : String(error);
-    return {
-      content: [{ type: "text" as const, text: `Failed to connect to "${serverName}": ${message}` }],
-      details: { mode: "connect", error: "connect_failed", server: serverName, message },
-    };
+    throw new Error(`Failed to connect to "${serverName}": ${message}`, { cause: error });
   }
 }
 
@@ -477,6 +475,19 @@ export async function executeCall(
   args?: Record<string, unknown>,
   serverOverride?: string,
   getPiTools?: () => ToolInfo[],
+  signal?: AbortSignal,
+): Promise<ProxyToolResult> {
+  const result = await executeCallInternal(state, toolName, args, serverOverride, getPiTools, signal);
+  return assertSuccessfulProxyResult(result);
+}
+
+async function executeCallInternal(
+  state: McpExtensionState,
+  toolName: string,
+  args?: Record<string, unknown>,
+  serverOverride?: string,
+  getPiTools?: () => ToolInfo[],
+  signal?: AbortSignal,
 ): Promise<ProxyToolResult> {
   let serverName: string | undefined = serverOverride;
   let toolMeta: ToolMetadata | undefined;
@@ -504,7 +515,7 @@ export async function executeCall(
   }
 
   if (serverName && !toolMeta) {
-    const connected = await lazyConnect(state, serverName);
+    const connected = await lazyConnect(state, serverName, signal);
     if (connected) {
       toolMeta = findToolByName(state.toolMetadata.get(serverName), toolName);
     } else {
@@ -522,7 +533,7 @@ export async function executeCall(
           if (autoAuth.status === "success") {
             await state.manager.close(serverName);
             state.failureTracker.delete(serverName);
-            const connectedAfterAuth = await lazyConnect(state, serverName);
+            const connectedAfterAuth = await lazyConnect(state, serverName, signal);
             if (connectedAfterAuth) {
               toolMeta = findToolByName(state.toolMetadata.get(serverName), toolName);
               if (!toolMeta) {
@@ -569,7 +580,7 @@ export async function executeCall(
       const failedAgo = getFailureAgeSeconds(state, configuredServer);
       if (failedAgo !== null && existingConnection?.status !== "needs-auth") continue;
 
-      let connected = await lazyConnect(state, configuredServer);
+      let connected = await lazyConnect(state, configuredServer, signal);
       if (!connected && state.manager.getConnection(configuredServer)?.status === "needs-auth" && !autoAuthAttempted) {
         autoAuthAttempted = true;
         const autoAuth = await attemptAutoAuth(state, configuredServer);
@@ -582,7 +593,7 @@ export async function executeCall(
         if (autoAuth.status === "success") {
           await state.manager.close(configuredServer);
           state.failureTracker.delete(configuredServer);
-          connected = await lazyConnect(state, configuredServer);
+          connected = await lazyConnect(state, configuredServer, signal);
         }
       }
 
@@ -601,10 +612,7 @@ export async function executeCall(
       ? getPiTools?.().find((tool) => tool.name === toolName && tool.name !== "mcp")
       : undefined;
     if (nativeTool) {
-      return {
-        content: [{ type: "text" as const, text: `"${toolName}" is a native Pi tool. Call ${toolName} directly instead of using mcp({ tool: "${toolName}" }).` }],
-        details: { mode: "call", error: "native_tool", requestedTool: toolName },
-      };
+      throw new Error(`"${toolName}" is a native Pi tool. Call ${toolName} directly instead of using mcp({ tool: "${toolName}" }).`);
     }
 
     const hintServer = serverName ?? prefixMatchedServer;
@@ -668,7 +676,7 @@ export async function executeCall(
       if (state.ui) {
         state.ui.setStatus("mcp", `MCP: connecting to ${serverName}...`);
       }
-      connection = await state.manager.connect(serverName, definition);
+      connection = await state.manager.connect(serverName, definition, signal);
       if (connection.status === "needs-auth") {
         if (!autoAuthAttempted) {
           autoAuthAttempted = true;
@@ -681,7 +689,7 @@ export async function executeCall(
           }
           if (autoAuth.status === "success") {
             await state.manager.close(serverName);
-            connection = await state.manager.connect(serverName, definition);
+            connection = await state.manager.connect(serverName, definition, signal);
           }
         }
 
@@ -720,13 +728,14 @@ export async function executeCall(
   }
 
   let uiSession: UiSessionRuntime | null = null;
+  let mcpErrorResultReceived = false;
 
   try {
     state.manager.touch(serverName);
     state.manager.incrementInFlight(serverName);
 
     if (toolMeta.resourceUri) {
-      const result = await connection.client.readResource({ uri: toolMeta.resourceUri });
+      const result = await connection.client.readResource({ uri: toolMeta.resourceUri }, { signal });
       const content = (result.contents ?? []).map(c => ({
         type: "text" as const,
         text: "text" in c ? c.text : ("blob" in c ? `[Binary data: ${(c as { mimeType?: string }).mimeType ?? "unknown"}]` : JSON.stringify(c)),
@@ -744,14 +753,14 @@ export async function executeCall(
           toolArgs: args ?? {},
           uiResourceUri: toolMeta.uiResourceUri,
           streamMode: toolMeta.uiStreamMode,
-        })
+        }, signal)
       : null;
 
     const resultPromise = connection.client.callTool({
       name: toolMeta.originalName,
       arguments: args ?? {},
       _meta: uiSession?.requestMeta,
-    });
+    }, undefined, { signal });
 
     if (toolMeta.uiResourceUri) {
       const result = await resultPromise;
@@ -765,14 +774,12 @@ export async function executeCall(
         .join("\n");
 
       if (result.isError) {
+        mcpErrorResultReceived = true;
         let errorWithSchema = `Error: ${mcpText || "Tool execution failed"}`;
         if (toolMeta.inputSchema) {
           errorWithSchema += `\n\nExpected parameters:\n${formatSchema(toolMeta.inputSchema)}`;
         }
-        return {
-          content: [{ type: "text" as const, text: errorWithSchema }],
-          details: { mode: "call", error: "tool_error", mcpResult: result },
-        };
+        throw new Error(`MCP tool failed: ${errorWithSchema}`);
       }
 
       const resultText = mcpText || "(empty result)";
@@ -791,6 +798,7 @@ export async function executeCall(
     const content = transformMcpContent(mcpContent);
 
     if (result.isError) {
+      mcpErrorResultReceived = true;
       const errorText = content
         .filter((c) => c.type === "text")
         .map((c) => (c as { text: string }).text)
@@ -801,10 +809,7 @@ export async function executeCall(
         errorWithSchema += `\n\nExpected parameters:\n${formatSchema(toolMeta.inputSchema)}`;
       }
 
-      return {
-        content: [{ type: "text" as const, text: errorWithSchema }],
-        details: { mode: "call", error: "tool_error", mcpResult: result },
-      };
+      throw new Error(`MCP tool failed: ${errorWithSchema}`);
     }
 
     return {
@@ -812,18 +817,23 @@ export async function executeCall(
       details: { mode: "call", mcpResult: result, server: serverName, tool: toolMeta.originalName },
     };
   } catch (error) {
+    if (error instanceof UrlElicitationRequiredError) {
+      const action = await state.manager.handleUrlElicitationRequired(serverName, error, signal);
+      const message = action === "accept"
+        ? "The original MCP tool did not run. Complete the opened browser interaction, then retry the tool."
+        : `The original MCP tool did not run because the URL interaction was ${action === "decline" ? "declined" : "cancelled"}.`;
+      uiSession?.sendToolCancelled(message);
+      throw new Error(message, { cause: error });
+    }
+    if (mcpErrorResultReceived) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    uiSession?.sendToolCancelled(message);
-
     let errorWithSchema = `Failed to call tool: ${message}`;
     if (toolMeta.inputSchema) {
       errorWithSchema += `\n\nExpected parameters:\n${formatSchema(toolMeta.inputSchema)}`;
     }
 
-    return {
-      content: [{ type: "text" as const, text: errorWithSchema }],
-      details: { mode: "call", error: "call_failed", message },
-    };
+    uiSession?.sendToolCancelled(errorWithSchema);
+    throw new Error(errorWithSchema, { cause: error });
   } finally {
     if (uiSession?.reused) {
       uiSession.close();

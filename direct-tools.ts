@@ -1,4 +1,5 @@
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { UrlElicitationRequiredError } from "@modelcontextprotocol/sdk/types.js";
 import type { McpExtensionState } from "./state.ts";
 import type { DirectToolSpec, McpConfig, McpContent } from "./types.ts";
 import type { MetadataCache } from "./metadata-cache.ts";
@@ -10,7 +11,7 @@ import { maybeStartUiSession, type UiSessionRuntime } from "./ui-session.ts";
 import { formatToolName, isToolExcluded } from "./types.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
 import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
-import { formatAuthRequiredMessage } from "./utils.ts";
+import { formatAuthRequiredMessage, waitForAbortSignal } from "./utils.ts";
 
 const BUILTIN_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "mcp"]);
 
@@ -273,79 +274,56 @@ export function createDirectToolExecutor(
   getInitPromise: () => Promise<McpExtensionState> | null,
   spec: DirectToolSpec
 ): DirectToolExecute {
-  return async function execute(_toolCallId, params) {
+  return async function execute(_toolCallId, params, signal) {
     let state = getState();
     const initPromise = getInitPromise();
 
     if (!state && initPromise) {
       try {
-        state = await initPromise;
+        state = await waitForAbortSignal(initPromise, signal);
       } catch (error) {
+        if (signal?.aborted) throw error;
         const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: "text" as const, text: `MCP initialization failed: ${message}` }],
-          details: { error: "init_failed", message },
-        };
+        throw new Error(`MCP initialization failed: ${message}`, { cause: error });
       }
     }
-    if (!state) {
-      return {
-        content: [{ type: "text" as const, text: "MCP not initialized" }],
-        details: { error: "not_initialized" },
-      };
-    }
+    if (!state) throw new Error("MCP not initialized");
 
-    let connected = await lazyConnect(state, spec.serverName);
-    let autoAuthAttempted = false;
+    let connected = await lazyConnect(state, spec.serverName, signal);
 
     if (!connected && state.manager.getConnection(spec.serverName)?.status === "needs-auth") {
-      autoAuthAttempted = true;
       const autoAuth = await attemptDirectAutoAuth(state, spec.serverName);
-      if (autoAuth.status === "failed") {
-        return {
-          content: [{ type: "text" as const, text: autoAuth.message }],
-          details: { error: "auth_required", server: spec.serverName, message: autoAuth.message },
-        };
-      }
+      if (autoAuth.status === "failed") throw new Error(autoAuth.message);
       if (autoAuth.status === "success") {
         await state.manager.close(spec.serverName);
         state.failureTracker.delete(spec.serverName);
-        connected = await lazyConnect(state, spec.serverName);
+        connected = await lazyConnect(state, spec.serverName, signal);
       }
     }
 
     if (!connected) {
       const authConnection = state.manager.getConnection(spec.serverName);
       if (authConnection?.status === "needs-auth") {
-        const message = getDirectAuthRequiredMessage(state, spec.serverName);
-        return {
-          content: [{ type: "text" as const, text: message }],
-          details: { error: "auth_required", server: spec.serverName, message, autoAuthAttempted },
-        };
+        throw new Error(getDirectAuthRequiredMessage(state, spec.serverName));
       }
       const failedAgo = getFailureAgeSeconds(state, spec.serverName);
-      return {
-        content: [{ type: "text" as const, text: `MCP server "${spec.serverName}" not available${failedAgo !== null ? ` (failed ${failedAgo}s ago)` : ""}` }],
-        details: { error: "server_unavailable", server: spec.serverName },
-      };
+      throw new Error(`MCP server "${spec.serverName}" not available${failedAgo !== null ? ` (failed ${failedAgo}s ago)` : ""}`);
     }
 
     const connection = state.manager.getConnection(spec.serverName);
     if (!connection || connection.status !== "connected") {
-      return {
-        content: [{ type: "text" as const, text: `MCP server "${spec.serverName}" not connected` }],
-        details: { error: "not_connected", server: spec.serverName },
-      };
+      throw new Error(`MCP server "${spec.serverName}" not connected`);
     }
 
     let uiSession: UiSessionRuntime | null = null;
+    let mcpErrorResultReceived = false;
 
     try {
       state.manager.touch(spec.serverName);
       state.manager.incrementInFlight(spec.serverName);
 
       if (spec.resourceUri) {
-        const result = await connection.client.readResource({ uri: spec.resourceUri });
+        const result = await connection.client.readResource({ uri: spec.resourceUri }, { signal });
         const content = (result.contents ?? []).map(c => ({
           type: "text" as const,
           text: "text" in c ? c.text : ("blob" in c ? `[Binary data: ${(c as { mimeType?: string }).mimeType ?? "unknown"}]` : JSON.stringify(c)),
@@ -364,14 +342,14 @@ export function createDirectToolExecutor(
             toolArgs: params ?? {},
             uiResourceUri: spec.uiResourceUri!,
             streamMode: spec.uiStreamMode,
-          })
+          }, signal)
         : null;
 
       const resultPromise = connection.client.callTool({
         name: spec.originalName,
         arguments: params ?? {},
         _meta: uiSession?.requestMeta,
-      });
+      }, undefined, { signal });
 
       const result = await resultPromise;
       uiSession?.sendToolResult(result as unknown as import("@modelcontextprotocol/sdk/types.js").CallToolResult);
@@ -380,14 +358,12 @@ export function createDirectToolExecutor(
       const content = transformMcpContent(mcpContent);
 
       if (result.isError) {
+        mcpErrorResultReceived = true;
         let errorText = content.filter(c => c.type === "text").map(c => (c as { text: string }).text).join("\n") || "Tool execution failed";
         if (spec.inputSchema) {
           errorText += `\n\nExpected parameters:\n${formatSchema(spec.inputSchema)}`;
         }
-        return {
-          content: [{ type: "text" as const, text: `Error: ${errorText}` }],
-          details: { error: "tool_error", server: spec.serverName },
-        };
+        throw new Error(`MCP tool failed: ${errorText}`);
       }
 
       const resultText = content.filter(c => c.type === "text").map(c => (c as { text: string }).text).join("\n") || "(empty result)";
@@ -406,16 +382,22 @@ export function createDirectToolExecutor(
         details: { server: spec.serverName, tool: spec.originalName },
       };
     } catch (error) {
+      if (error instanceof UrlElicitationRequiredError) {
+        const action = await state.manager.handleUrlElicitationRequired(spec.serverName, error, signal);
+        const message = action === "accept"
+          ? "The original MCP tool did not run. Complete the opened browser interaction, then retry the tool."
+          : `The original MCP tool did not run because the URL interaction was ${action === "decline" ? "declined" : "cancelled"}.`;
+        uiSession?.sendToolCancelled(message);
+        throw new Error(message, { cause: error });
+      }
+      if (mcpErrorResultReceived) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      uiSession?.sendToolCancelled(message);
       let errorText = `Failed to call tool: ${message}`;
       if (spec.inputSchema) {
         errorText += `\n\nExpected parameters:\n${formatSchema(spec.inputSchema)}`;
       }
-      return {
-        content: [{ type: "text" as const, text: errorText }],
-        details: { error: "call_failed", server: spec.serverName },
-      };
+      uiSession?.sendToolCancelled(errorText);
+      throw new Error(errorText, { cause: error });
     } finally {
       if (uiSession?.reused) {
         uiSession.close();

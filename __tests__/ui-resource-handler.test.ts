@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { UiResourceHandler } from "../ui-resource-handler.ts";
+import { maybeStartUiSession } from "../ui-session.ts";
+import { UrlElicitationRequiredError } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServerManager } from "../server-manager.ts";
 
 // Mock the manager
@@ -10,6 +12,27 @@ function createMockManager(overrides: Partial<McpServerManager> = {}): McpServer
     ...overrides,
   } as unknown as McpServerManager;
 }
+
+describe("UI resource preload cancellation", () => {
+  it("threads the tool signal through maybeStartUiSession and preserves URL-required errors", async () => {
+    const error = new UrlElicitationRequiredError([{
+      mode: "url", message: "Authorize", elicitationId: "preload", url: "https://example.com/",
+    }]);
+    const readUiResource = vi.fn().mockRejectedValue(error);
+    const signal = new AbortController().signal;
+    const state = {
+      uiServer: null,
+      uiResourceHandler: { readUiResource },
+      manager: {},
+      completedUiSessions: [],
+    } as any;
+
+    await expect(maybeStartUiSession(state, {
+      serverName: "server", toolName: "tool", toolArgs: {}, uiResourceUri: "ui://test/widget",
+    }, signal)).rejects.toBe(error);
+    expect(readUiResource).toHaveBeenCalledWith("server", "ui://test/widget", signal);
+  });
+});
 
 describe("UiResourceHandler", () => {
   describe("readUiResource", () => {
@@ -265,6 +288,28 @@ describe("UiResourceHandler", () => {
 
       expect(result.meta.domain).toBe("example.com");
       expect(result.meta.prefersBorder).toBe(true);
+    });
+
+    it("forwards tool cancellation to UI resource preloads", async () => {
+      const readResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: "ui://test/widget", mimeType: "text/html", text: "<p>ok</p>" }],
+      });
+      const manager = createMockManager({ readResource });
+      const handler = new UiResourceHandler(manager);
+      const signal = new AbortController().signal;
+
+      await handler.readUiResource("server", "ui://test/widget", signal);
+      expect(readResource).toHaveBeenCalledWith("server", "ui://test/widget", signal);
+    });
+
+    it("preserves typed URL-required errors from UI resource preloads", async () => {
+      const error = new UrlElicitationRequiredError([{
+        mode: "url", message: "Authorize", elicitationId: "resource-auth", url: "https://example.com/",
+      }]);
+      const manager = createMockManager({ readResource: vi.fn().mockRejectedValue(error) });
+      const handler = new UiResourceHandler(manager);
+
+      await expect(handler.readUiResource("server", "ui://test/widget")).rejects.toBe(error);
     });
 
     it("throws when content has no text or blob", async () => {

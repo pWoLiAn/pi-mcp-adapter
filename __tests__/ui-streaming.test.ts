@@ -197,8 +197,11 @@ describe("UI Streaming", () => {
       (manager as unknown as {
         attachAdapterNotificationHandlers: (serverName: string, client: { setNotificationHandler: typeof client.setNotificationHandler }) => void;
       }).attachAdapterNotificationHandlers(serverName, client);
-      expect(client.setNotificationHandler).toHaveBeenCalledOnce();
-      return client.setNotificationHandler.mock.calls[0][1] as (notification: {
+      const streamHandlerCall = client.setNotificationHandler.mock.calls.find(
+        ([schema]) => schema === serverStreamResultPatchNotificationSchema,
+      );
+      expect(streamHandlerCall).toBeDefined();
+      return streamHandlerCall![1] as (notification: {
         method: string;
         params: {
           streamToken: string;

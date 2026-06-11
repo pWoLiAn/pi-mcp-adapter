@@ -6,15 +6,26 @@ import { loadMcpConfig } from "./config.ts";
 import { buildProxyDescription, createDirectToolExecutor, getMissingConfiguredDirectToolServers, resolveDirectTools } from "./direct-tools.ts";
 import { flushMetadataCache, initializeMcp, updateStatusBar } from "./init.ts";
 import { loadMetadataCache } from "./metadata-cache.ts";
-import { executeCall, executeConnect, executeDescribe, executeList, executeSearch, executeStatus, executeUiMessages } from "./proxy-modes.ts";
-import { getConfigPathFromArgv, truncateAtWord } from "./utils.ts";
+import { assertSuccessfulProxyResult, executeCall, executeConnect, executeDescribe, executeList, executeSearch, executeStatus, executeUiMessages } from "./proxy-modes.ts";
+import { getConfigPathFromArgv, truncateAtWord, waitForAbortSignal } from "./utils.ts";
 import { initializeOAuth, shutdownOAuth } from "./mcp-auth-flow.ts";
 import { createMcpDirectToolCallRenderer, renderMcpProxyToolCall, renderMcpToolResult } from "./tool-result-renderer.ts";
 
 export default function mcpAdapter(pi: ExtensionAPI) {
   let state: McpExtensionState | null = null;
   let initPromise: Promise<McpExtensionState> | null = null;
+  let initController: AbortController | null = null;
+  let initializingManager: McpExtensionState["manager"] | null = null;
   let lifecycleGeneration = 0;
+
+  function cancelPendingInitialization(reason: string): Promise<void> {
+    initController?.abort(new Error(reason));
+    initController = null;
+    initPromise = null;
+    const manager = initializingManager;
+    initializingManager = null;
+    return manager?.closeAll() ?? Promise.resolve();
+  }
 
   async function shutdownState(currentState: McpExtensionState | null, reason: string): Promise<void> {
     if (!currentState) return;
@@ -90,10 +101,10 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     const generation = ++lifecycleGeneration;
     const previousState = state;
     state = null;
-    initPromise = null;
 
     try {
       await Promise.all([
+        cancelPendingInitialization("MCP session restarted during initialization"),
         shutdownState(previousState, "session_restart"),
         shutdownOAuth(),
       ]);
@@ -109,7 +120,15 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       console.error("MCP OAuth initialization failed:", err);
     });
 
-    const promise = initializeMcp(pi, ctx);
+    const controller = new AbortController();
+    initController = controller;
+    const promise = initializeMcp(pi, ctx, {
+      signal: controller.signal,
+      onManager: (manager) => {
+        if (initController === controller) initializingManager = manager;
+        else void manager.closeAll();
+      },
+    });
     initPromise = promise;
 
     promise.then(async (nextState) => {
@@ -125,6 +144,8 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       state = nextState;
       updateStatusBar(nextState);
       initPromise = null;
+      initController = null;
+      initializingManager = null;
     }).catch(err => {
       if (generation !== lifecycleGeneration) {
         return;
@@ -134,6 +155,8 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       }
       console.error("MCP initialization failed:", err);
       initPromise = null;
+      if (initController === controller) initController = null;
+      if (initController === null) initializingManager = null;
     });
   });
 
@@ -141,10 +164,10 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     ++lifecycleGeneration;
     const currentState = state;
     state = null;
-    initPromise = null;
 
     try {
       await Promise.all([
+        cancelPendingInitialization("MCP session shut down during initialization"),
         shutdownState(currentState, "session_shutdown"),
         shutdownOAuth(),
       ]);
@@ -276,7 +299,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         includeSchemas?: boolean;
         server?: string;
         action?: string;
-      }, _signal, _onUpdate, _ctx) {
+      }, signal, _onUpdate, _ctx) {
         let parsedArgs: Record<string, unknown> | undefined;
         if (params.args) {
           try {
@@ -295,39 +318,32 @@ export default function mcpAdapter(pi: ExtensionAPI) {
 
         if (!state && initPromise) {
           try {
-            state = await initPromise;
+            state = await waitForAbortSignal(initPromise, signal);
           } catch (error) {
+            if (signal?.aborted) throw error;
             const message = error instanceof Error ? error.message : String(error);
-            return {
-              content: [{ type: "text" as const, text: `MCP initialization failed: ${message}` }],
-              details: { error: "init_failed", message },
-            };
+            throw new Error(`MCP initialization failed: ${message}`, { cause: error });
           }
         }
-        if (!state) {
-          return {
-            content: [{ type: "text" as const, text: "MCP not initialized" }],
-            details: { error: "not_initialized" },
-          };
-        }
+        if (!state) throw new Error("MCP not initialized");
 
         if (params.action === "ui-messages") {
           return executeUiMessages(state);
         }
         if (params.tool) {
-          return executeCall(state, params.tool, parsedArgs, params.server, getPiTools);
+          return executeCall(state, params.tool, parsedArgs, params.server, getPiTools, signal);
         }
         if (params.connect) {
-          return executeConnect(state, params.connect);
+          return executeConnect(state, params.connect, signal);
         }
         if (params.describe) {
-          return executeDescribe(state, params.describe);
+          return assertSuccessfulProxyResult(executeDescribe(state, params.describe));
         }
         if (params.search) {
-          return executeSearch(state, params.search, params.regex, params.server, params.includeSchemas);
+          return assertSuccessfulProxyResult(executeSearch(state, params.search, params.regex, params.server, params.includeSchemas));
         }
         if (params.server) {
-          return executeList(state, params.server);
+          return assertSuccessfulProxyResult(executeList(state, params.server));
         }
         return executeStatus(state);
       },

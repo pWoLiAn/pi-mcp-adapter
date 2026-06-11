@@ -170,13 +170,14 @@ For pre-registered browser OAuth clients, set `oauth.redirectUri` to the exact c
 | `sampling` | Allow MCP servers to sample through Pi models, honoring `modelPreferences.hints` before current/default fallback (default: true when UI approval is available). |
 | `samplingAutoApprove` | Skip sampling confirmation prompts. Required for sampling in non-UI sessions (default: false). |
 | `elicitation` | Allow MCP servers to request user input through Pi UI dialogs and URL prompts (default: true when Pi UI is available). |
-| `elicitationAutoOpenUrls` | Automatically open URL elicitations without prompting first (default: false). |
 
 Per-server `idleTimeout` overrides the global setting.
 
 ### MCP Elicitation
 
-When Pi exposes dialog-capable UI, the adapter advertises MCP elicitation support. Form elicitations use Pi's standard `select()` and `input()` dialogs for strings, numbers, booleans, single-select enums, and multi-select enums. Submitting maps to MCP `accept`, choosing Decline maps to `decline`, and dismissing any dialog maps to `cancel`. URL elicitations use the same stock Pi dialogs before opening a browser unless `elicitationAutoOpenUrls` is enabled.
+When Pi exposes dialog-capable UI, the adapter advertises MCP form elicitation support. URL mode is advertised only when the process can positively identify a local TUI; RPC sessions remain form-only and never open a browser on the backend. Forms use Pi's standard `select()` and `input()` dialogs for strings, numbers, booleans, single-select enums, and multi-select enums. Defaults and omission are explicit choices. Before submission, Pi shows all values and lets the user edit individual fields. Submitting maps to MCP `accept`, choosing Decline maps to `decline`, and dismissing any dialog maps to `cancel`.
+
+URL elicitations sanitize untrusted terminal text, separately show the parsed host and exact supplied URL, reject controls and embedded credentials, and always require explicit consent. Requests, URLs, fields, choices, queues, completion state, and validator caches are bounded. Cancellation removes queued requests immediately and stops active connection/dialog/launch waits. Form mode is only for non-sensitive data. Standard URL-required tool errors (`-32042`) run the same consent flow, then fail the original Pi tool invocation so the model can retry only after the browser interaction completes.
 
 ### Direct Tools
 

@@ -25,14 +25,41 @@ import { getMissingConfiguredDirectToolServers } from "./direct-tools.ts";
 
 const FAILURE_BACKOFF_MS = 60 * 1000;
 
+export interface InitializeMcpOptions {
+  signal?: AbortSignal;
+  onManager?: (manager: McpServerManager) => void;
+}
+
+type PiExecutionMode = "tui" | "rpc" | "json" | "print";
+
+/** Resolve local-TUI capability conservatively across Pi versions that predate ctx.mode. */
+export function isLocalTuiExecution(
+  ctx: Pick<ExtensionContext, "hasUI"> & { mode?: PiExecutionMode },
+  argv = process.argv,
+  terminalAttached = process.stdin.isTTY === true && process.stdout.isTTY === true,
+): boolean {
+  if (!ctx.hasUI) return false;
+  if (ctx.mode) return ctx.mode === "tui";
+
+  const modeEquals = argv.find((arg) => arg.startsWith("--mode="))?.slice("--mode=".length);
+  const modeIndex = argv.indexOf("--mode");
+  const cliMode = modeEquals ?? (modeIndex >= 0 ? argv[modeIndex + 1] : undefined);
+  if (cliMode) return cliMode === "tui";
+  if (argv.includes("-p") || argv.includes("--print")) return false;
+  return terminalAttached;
+}
+
 export async function initializeMcp(
   pi: ExtensionAPI,
-  ctx: ExtensionContext
+  ctx: ExtensionContext,
+  options: InitializeMcpOptions = {},
 ): Promise<McpExtensionState> {
   const configPath = pi.getFlag("mcp-config") as string | undefined;
   const config = loadMcpConfig(configPath, ctx.cwd);
 
   const manager = new McpServerManager();
+  options.onManager?.(manager);
+  options.signal?.throwIfAborted();
   const samplingAutoApprove = config.settings?.samplingAutoApprove === true;
   if (config.settings?.sampling !== false && (ctx.hasUI || samplingAutoApprove)) {
     manager.setSamplingConfig({
@@ -46,8 +73,9 @@ export async function initializeMcp(
   const elicitationEnabled = config.settings?.elicitation !== false && ctx.hasUI;
   if (elicitationEnabled) {
     manager.setElicitationConfig({
-      ui: ctx.ui as any,
-      autoOpenUrls: config.settings?.elicitationAutoOpenUrls === true,
+      ui: ctx.ui,
+      // RPC dialogs can collect forms, but only local TUI owns the browser boundary.
+      allowUrl: isLocalTuiExecution(ctx as ExtensionContext & { mode?: PiExecutionMode }),
     });
   }
   const lifecycle = new McpLifecycleManager(manager);
@@ -125,7 +153,7 @@ export async function initializeMcp(
 
   const results = await parallelLimit(startupServers, 10, async ([name, definition]) => {
     try {
-      const connection = await manager.connect(name, definition);
+      const connection = await manager.connect(name, definition, options.signal);
       if (connection.status === "needs-auth") {
         return { name, definition, connection: null, error: `OAuth authentication required. Run /mcp-auth ${name}.` };
       }
@@ -135,6 +163,11 @@ export async function initializeMcp(
       return { name, definition, connection: null, error: message };
     }
   });
+
+  if (options.signal?.aborted) {
+    await manager.closeAll();
+    options.signal.throwIfAborted();
+  }
 
   for (const { name, definition, connection, error } of results) {
     if (error || !connection) {
@@ -179,7 +212,7 @@ export async function initializeMcp(
         async (name) => {
           const definition = config.mcpServers[name];
           try {
-            const connection = await manager.connect(name, definition);
+            const connection = await manager.connect(name, definition, options.signal);
             if (connection.status === "needs-auth") {
               return { name, ok: false };
             }
@@ -199,6 +232,11 @@ export async function initializeMcp(
         ctx.ui.notify(`MCP: direct tools for ${bootstrapped.join(", ")} will be available after restart`, "info");
       }
     }
+  }
+
+  if (options.signal?.aborted) {
+    await manager.closeAll();
+    options.signal.throwIfAborted();
   }
 
   lifecycle.setReconnectCallback((serverName) => {
@@ -293,7 +331,7 @@ export function getFailureAgeSeconds(state: McpExtensionState, serverName: strin
   return Math.round(ageMs / 1000);
 }
 
-export async function lazyConnect(state: McpExtensionState, serverName: string): Promise<boolean> {
+export async function lazyConnect(state: McpExtensionState, serverName: string, signal?: AbortSignal): Promise<boolean> {
   const connection = state.manager.getConnection(serverName);
   if (connection?.status === "needs-auth") {
     return false;
@@ -313,7 +351,7 @@ export async function lazyConnect(state: McpExtensionState, serverName: string):
     if (state.ui) {
       state.ui.setStatus("mcp", `MCP: connecting to ${serverName}...`);
     }
-    const newConnection = await state.manager.connect(serverName, definition);
+    const newConnection = await state.manager.connect(serverName, definition, signal);
     if (newConnection.status === "needs-auth") {
       return false;
     }
@@ -323,6 +361,7 @@ export async function lazyConnect(state: McpExtensionState, serverName: string):
     updateStatusBar(state);
     return true;
   } catch (error) {
+    if (signal?.aborted) throw error;
     state.failureTracker.set(serverName, Date.now());
     const message = error instanceof Error ? error.message : String(error);
     logger.debug(`MCP: lazy connect failed for ${serverName}: ${message}`);

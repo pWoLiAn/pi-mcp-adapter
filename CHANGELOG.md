@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Enabled MCP elicitation on stock Pi releases by using the supported `select()` and `input()` UI dialogs instead of relying on a nonexistent `ctx.ui.form()` API.
+- Required explicit consent for every URL elicitation and removed the unsafe `elicitationAutoOpenUrls` setting.
+- Added explicit default/omit form choices, review/edit, bounded abort-aware prompt queuing, initialization shutdown, MCP-schema response validation, and browser-open failure handling.
+- Sanitized untrusted terminal text, rejected URL controls and credentials, highlighted URL origins, preserved the exact supplied browser URL, and limited URL mode to positively identified local TUI sessions.
+- Bounded request sizes, fields, choices, URL completion state, and AJV validator retention.
+- Handled standard URL-required tool errors (`-32042`) and completion notifications without recording failed Pi operations as successful or settling MCP UI calls more than once.
+- Forwarded Pi tool cancellation signals to connection waits, MCP tools, resources, and UI-resource preloads.
+- Declared Pi-provided packages as wildcard peer dependencies per the Pi package contract.
 
 ## [2.9.0] - 2026-06-04
 
