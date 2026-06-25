@@ -2,8 +2,20 @@ import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tu
 import { createPanelKeys, type PanelKeybindings, type PanelKeys } from "./panel-keys.ts";
 import { isToolExcluded } from "./types.ts";
 import type { McpConfig, McpPanelCallbacks, McpPanelResult, ServerProvenance } from "./types.ts";
-import { resourceNameToToolName } from "./resource-tools.ts";
 import type { MetadataCache, ServerCacheEntry, CachedTool } from "./metadata-cache.ts";
+
+function resourceNameToToolName(name: string): string {
+  let result = name
+    .replace(/[^a-zA-Z0-9]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+/, "")
+    .replace(/_+$/, "")
+    .toLowerCase();
+  if (!result || /^\d/.test(result)) {
+    result = "resource" + (result ? "_" + result : "");
+  }
+  return result;
+}
 
 interface PanelTheme {
   border: string;

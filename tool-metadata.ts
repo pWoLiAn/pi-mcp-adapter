@@ -1,9 +1,19 @@
-import { getToolUiResourceUri } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { McpExtensionState } from "./state.ts";
 import type { ToolMetadata, McpTool, McpResource, ServerEntry } from "./types.ts";
 import { formatToolName, isToolExcluded } from "./types.ts";
-import { resourceNameToToolName } from "./resource-tools.ts";
-import { extractToolUiStreamMode } from "./utils.ts";
+
+function resourceNameToToolName(name: string): string {
+  let result = name
+    .replace(/[^a-zA-Z0-9]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+/, "")
+    .replace(/_+$/, "")
+    .toLowerCase();
+  if (!result || /^\d/.test(result)) {
+    result = "resource" + (result ? "_" + result : "");
+  }
+  return result;
+}
 
 export function buildToolMetadata(
   tools: McpTool[],
@@ -24,19 +34,11 @@ export function buildToolMetadata(
       continue;
     }
 
-    let uiResourceUri: string | undefined;
-    try {
-      uiResourceUri = getToolUiResourceUri({ _meta: tool._meta });
-    } catch {
-      failedTools.push(tool.name);
-    }
     metadata.push({
       name: formatToolName(tool.name, serverName, prefix),
       originalName: tool.name,
       description: tool.description ?? "",
       inputSchema: tool.inputSchema,
-      uiResourceUri,
-      uiStreamMode: extractToolUiStreamMode(tool._meta),
     });
   }
 

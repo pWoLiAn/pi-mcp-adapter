@@ -3,29 +3,15 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
-import {
-  ElicitationCompleteNotificationSchema,
-  type ReadResourceResult,
-  type UrlElicitationRequiredError,
-} from "@modelcontextprotocol/sdk/types.js";
+import type { ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
 import type {
   McpTool,
   McpResource,
   ServerDefinition,
-  ServerStreamResultPatchNotification,
   Transport,
 } from "./types.ts";
-import { serverStreamResultPatchNotificationSchema } from "./types.ts";
 import { resolveNpxBinary } from "./npx-resolver.ts";
 import { logger } from "./logger.ts";
-import { McpOAuthProvider } from "./mcp-oauth-provider.ts";
-import { extractOAuthConfig, supportsOAuth } from "./mcp-auth-flow.ts";
-import { registerSamplingHandler, type ServerSamplingConfig } from "./sampling-handler.ts";
-import {
-  handleUrlElicitation,
-  registerElicitationHandler,
-  type ServerElicitationConfig,
-} from "./elicitation-handler.ts";
 import { interpolateEnvRecord, resolveBearerToken, resolveConfigPath } from "./utils.ts";
 
 interface ServerConnection {
@@ -39,23 +25,9 @@ interface ServerConnection {
   status: "connected" | "closed" | "needs-auth";
 }
 
-type UiStreamListener = (serverName: string, notification: ServerStreamResultPatchNotification["params"]) => void;
-
 export class McpServerManager {
   private connections = new Map<string, ServerConnection>();
   private connectPromises = new Map<string, Promise<ServerConnection>>();
-  private uiStreamListeners = new Map<string, UiStreamListener>();
-  private samplingConfig: ServerSamplingConfig | undefined;
-  private elicitationConfig: ServerElicitationConfig | undefined;
-  private acceptedUrlElicitations = new Map<string, Set<string>>();
-
-  setSamplingConfig(config: ServerSamplingConfig | undefined): void {
-    this.samplingConfig = config;
-  }
-
-  setElicitationConfig(config: ServerElicitationConfig | undefined): void {
-    this.elicitationConfig = config;
-  }
 
   async connect(name: string, definition: ServerDefinition): Promise<ServerConnection> {
     // Dedupe concurrent connection attempts
@@ -119,7 +91,6 @@ export class McpServerManager {
 
     try {
       await client.connect(transport);
-      this.attachAdapterNotificationHandlers(name, client);
 
       // Discover tools and resources
       const [tools, resources] = await Promise.all([
@@ -138,8 +109,8 @@ export class McpServerManager {
         status: "connected",
       };
     } catch (error) {
-      // Check for UnauthorizedError - server requires OAuth
-      if (error instanceof UnauthorizedError && supportsOAuth(definition)) {
+      // Check for UnauthorizedError - server requires authentication
+      if (error instanceof UnauthorizedError) {
         // Clean up both client and transport before reporting needs-auth.
         await client.close().catch(() => {});
         await transport.close().catch(() => {});
@@ -163,72 +134,10 @@ export class McpServerManager {
     }
   }
 
-  private buildClientCapabilities() {
-    return {
-      ...(this.samplingConfig ? { sampling: {} } : {}),
-      ...(this.elicitationConfig
-        ? {
-            elicitation: {
-              form: {},
-              ...(this.elicitationConfig.allowUrl ? { url: {} } : {}),
-            },
-          }
-        : {}),
-    };
-  }
-
   private createClient(serverName: string): Client {
-    const capabilities = this.buildClientCapabilities();
-    const client = new Client(
+    return new Client(
       { name: `pi-mcp-${serverName}`, version: "1.0.0" },
-      Object.keys(capabilities).length > 0 ? { capabilities } : undefined,
     );
-    if (this.samplingConfig) {
-      registerSamplingHandler(client, { ...this.samplingConfig, serverName });
-    }
-    if (this.elicitationConfig) {
-      registerElicitationHandler(client, {
-        ...this.elicitationConfig,
-        serverName,
-        onUrlAccepted: elicitationId => this.rememberUrlElicitation(serverName, elicitationId),
-      });
-      if (this.elicitationConfig.allowUrl) {
-        client.setNotificationHandler(ElicitationCompleteNotificationSchema, notification => {
-          const accepted = this.acceptedUrlElicitations.get(serverName);
-          if (!accepted?.delete(notification.params.elicitationId)) return;
-          this.elicitationConfig?.ui.notify(
-            `MCP browser interaction for ${serverName} completed. You can retry the tool now.`,
-            "info",
-          );
-        });
-      }
-    }
-    return client;
-  }
-
-  async handleUrlElicitationRequired(
-    serverName: string,
-    error: UrlElicitationRequiredError,
-  ): Promise<"accept" | "decline" | "cancel"> {
-    if (!this.elicitationConfig?.allowUrl) return "cancel";
-    for (const params of error.elicitations) {
-      const result = await handleUrlElicitation({
-        ...this.elicitationConfig,
-        serverName,
-        onUrlAccepted: elicitationId => this.rememberUrlElicitation(serverName, elicitationId),
-      }, params);
-      if (result.action !== "accept") return result.action;
-    }
-    return "accept";
-  }
-
-  private rememberUrlElicitation(serverName: string, elicitationId: string): void {
-    let accepted = this.acceptedUrlElicitations.get(serverName);
-    if (!accepted) {
-      accepted = new Set();
-      this.acceptedUrlElicitations.set(serverName, accepted);
-    }
-    accepted.add(elicitationId);
   }
 
   private async createHttpTransport(
@@ -248,30 +157,11 @@ export class McpServerManager {
       }
     }
 
-    // Create request init with headers (Authorization now included for bearer auth)
+    // Create request init with headers
     const requestInit = Object.keys(headers).length > 0 ? { headers } : undefined;
 
-    // For OAuth servers, create an auth provider
-    let authProvider: McpOAuthProvider | undefined;
-    if (supportsOAuth(definition)) {
-      const oauthConfig = extractOAuthConfig(definition);
-      authProvider = new McpOAuthProvider(
-        serverName,
-        definition.url!,
-        oauthConfig,
-        {
-          onRedirect: async (_authUrl) => {
-            // URL is captured by startAuth, no need to log
-          },
-        }
-      );
-    }
-
     // Try StreamableHTTP first (modern MCP servers)
-    const streamableTransport = new StreamableHTTPClientTransport(url, {
-      requestInit,
-      authProvider,
-    });
+    const streamableTransport = new StreamableHTTPClientTransport(url, { requestInit });
 
     try {
       // Create a test client to verify the transport works
@@ -282,7 +172,7 @@ export class McpServerManager {
       await streamableTransport.close().catch(() => {});
 
       // StreamableHTTP works - create fresh transport for actual use
-      return new StreamableHTTPClientTransport(url, { requestInit, authProvider });
+      return new StreamableHTTPClientTransport(url, { requestInit });
     } catch (error) {
       // StreamableHTTP failed, close and try SSE fallback
       await streamableTransport.close().catch(() => {});
@@ -293,7 +183,7 @@ export class McpServerManager {
       }
 
       // SSE is the legacy transport
-      return new SSEClientTransport(url, { requestInit, authProvider });
+      return new SSEClientTransport(url, { requestInit });
     }
   }
 
@@ -328,22 +218,6 @@ export class McpServerManager {
     }
   }
 
-  private attachAdapterNotificationHandlers(serverName: string, client: Client): void {
-    client.setNotificationHandler(serverStreamResultPatchNotificationSchema, (notification) => {
-      const listener = this.uiStreamListeners.get(notification.params.streamToken);
-      if (!listener) return;
-      listener(serverName, notification.params);
-    });
-  }
-
-  registerUiStreamListener(streamToken: string, listener: UiStreamListener): void {
-    this.uiStreamListeners.set(streamToken, listener);
-  }
-
-  removeUiStreamListener(streamToken: string): void {
-    this.uiStreamListeners.delete(streamToken);
-  }
-
   async readResource(name: string, uri: string): Promise<ReadResourceResult> {
     const connection = this.connections.get(name);
     if (!connection || connection.status !== "connected") {
@@ -369,7 +243,6 @@ export class McpServerManager {
     // delete() would then remove, orphaning the new server process.
     connection.status = "closed";
     this.connections.delete(name);
-    this.acceptedUrlElicitations.delete(name);
     await connection.client.close().catch(() => {});
     await connection.transport.close().catch(() => {});
   }

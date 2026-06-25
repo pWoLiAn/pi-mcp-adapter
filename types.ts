@@ -3,7 +3,6 @@ import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdi
 import type { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai";
-import type { UiStreamMode } from "./ui-stream-types.ts";
 
 // Transport type (stdio + HTTP)
 export type Transport = 
@@ -108,36 +107,7 @@ export interface UiHostContext {
 
 export type UiDisplayMode = "inline" | "fullscreen" | "pip";
 
-// Re-export stream types from the shared lightweight module.
-// This allows the example package to import stream schemas without pulling the full types.ts dependency graph.
-export {
-  UI_STREAM_HOST_CONTEXT_KEY,
-  UI_STREAM_REQUEST_META_KEY,
-  UI_STREAM_RESULT_PATCH_METHOD,
-  SERVER_STREAM_RESULT_PATCH_METHOD,
-  UI_STREAM_STRUCTURED_CONTENT_KEY,
-  uiStreamModeSchema,
-  visualizationStreamPhaseSchema,
-  visualizationStreamFrameTypeSchema,
-  visualizationStreamStatusSchema,
-  uiStreamHostContextSchema,
-  visualizationStreamEnvelopeSchema,
-  uiStreamCallToolResultSchema,
-  uiStreamResultPatchNotificationSchema,
-  serverStreamResultPatchNotificationSchema,
-  getUiStreamHostContext,
-  getVisualizationStreamEnvelope,
-  type UiStreamMode,
-  type VisualizationStreamPhase,
-  type VisualizationStreamFrameType,
-  type VisualizationStreamStatus,
-  type UiStreamHostContext,
-  type VisualizationStreamEnvelope,
-  type UiStreamCallToolResult,
-  type UiStreamResultPatchNotification,
-  type ServerStreamResultPatchNotification,
-  type UiStreamSummary,
-} from "./ui-stream-types.ts";
+
 
 export interface UiMessageParams {
   role?: string;
@@ -354,7 +324,6 @@ export interface ToolMetadata {
   resourceUri?: string;   // For resource tools: the URI to read
   uiResourceUri?: string; // For app-enabled tools: the UI resource URI
   inputSchema?: unknown;  // JSON Schema for parameters (stored for describe/errors)
-  uiStreamMode?: UiStreamMode;
 }
 
 export interface DirectToolSpec {
@@ -365,7 +334,6 @@ export interface DirectToolSpec {
   inputSchema?: unknown;
   resourceUri?: string;
   uiResourceUri?: string;
-  uiStreamMode?: UiStreamMode;
 }
 
 export interface ServerProvenance {

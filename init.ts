@@ -3,7 +3,6 @@ import type { McpExtensionState } from "./state.ts";
 import type { ToolMetadata } from "./types.ts";
 import { existsSync } from "node:fs";
 import { loadMcpConfig } from "./config.ts";
-import { ConsentManager } from "./consent-manager.ts";
 import { McpLifecycleManager } from "./lifecycle.ts";
 import {
   computeServerHash,
@@ -18,10 +17,8 @@ import {
 } from "./metadata-cache.ts";
 import { McpServerManager } from "./server-manager.ts";
 import { buildToolMetadata, totalToolCount } from "./tool-metadata.ts";
-import { UiResourceHandler } from "./ui-resource-handler.ts";
-import { openUrl, parallelLimit } from "./utils.ts";
+import { parallelLimit } from "./utils.ts";
 import { logger } from "./logger.ts";
-import { getMissingConfiguredDirectToolServers } from "./direct-tools.ts";
 
 const FAILURE_BACKOFF_MS = 60 * 1000;
 
@@ -37,28 +34,9 @@ export async function initializeMcp(
   const config = loadMcpConfig(configPath, ctx.cwd);
 
   const manager = new McpServerManager();
-  const samplingAutoApprove = config.settings?.samplingAutoApprove === true;
-  if (config.settings?.sampling !== false && (ctx.hasUI || samplingAutoApprove)) {
-    manager.setSamplingConfig({
-      autoApprove: samplingAutoApprove,
-      ui: ctx.hasUI ? ctx.ui : undefined,
-      modelRegistry: ctx.modelRegistry,
-      getCurrentModel: () => ctx.model,
-      getSignal: () => ctx.signal,
-    });
-  }
-  const elicitationEnabled = config.settings?.elicitation !== false && ctx.hasUI;
-  if (elicitationEnabled) {
-    manager.setElicitationConfig({
-      ui: ctx.ui,
-      allowUrl: isTuiMode(ctx),
-    });
-  }
   const lifecycle = new McpLifecycleManager(manager);
   const toolMetadata = new Map<string, ToolMetadata[]>();
   const failureTracker = new Map<string, number>();
-  const uiResourceHandler = new UiResourceHandler(manager);
-  const consentManager = new ConsentManager("once-per-server");
   const ui = ctx.hasUI ? ctx.ui : undefined;
   const state: McpExtensionState = {
     manager,
@@ -66,13 +44,7 @@ export async function initializeMcp(
     toolMetadata,
     config,
     failureTracker,
-    uiResourceHandler,
-    consentManager,
-    uiServer: null,
-    completedUiSessions: [],
-    openBrowser: (url: string) => openUrl(pi, url, process.env.BROWSER),
     ui,
-    sendMessage: (message, options) => pi.sendMessage(message as unknown as Parameters<typeof pi.sendMessage>[0], options),
   };
 
   const serverEntries = Object.entries(config.mcpServers);
@@ -131,7 +103,7 @@ export async function initializeMcp(
     try {
       const connection = await manager.connect(name, definition);
       if (connection.status === "needs-auth") {
-        return { name, definition, connection: null, error: `OAuth authentication required. Run /mcp-auth ${name}.` };
+        return { name, definition, connection: null, error: `Authentication required. Run mcp({ action: "auth-start", server: "${name}" }) to authenticate.` };
       }
       return { name, definition, connection, error: null };
     } catch (error) {
@@ -169,40 +141,6 @@ export async function initializeMcp(
       ? `MCP: ${connectedCount}/${startupServers.length} servers connected (${totalTools} tools)`
       : `MCP: ${connectedCount} servers connected (${totalTools} tools)`;
     ctx.ui.notify(msg, "info");
-  }
-
-  const envDirect = process.env.MCP_DIRECT_TOOLS;
-  if (envDirect !== "__none__") {
-    const currentCache = loadMetadataCache();
-    const missingCacheServers = getMissingConfiguredDirectToolServers(config, currentCache);
-
-    if (missingCacheServers.length > 0) {
-      const bootstrapResults = await parallelLimit(
-        missingCacheServers.filter(name => !results.some(r => r.name === name && r.connection)),
-        10,
-        async (name) => {
-          const definition = config.mcpServers[name];
-          try {
-            const connection = await manager.connect(name, definition);
-            if (connection.status === "needs-auth") {
-              return { name, ok: false };
-            }
-            const { metadata } = buildToolMetadata(connection.tools, connection.resources, definition, name, prefix);
-            toolMetadata.set(name, metadata);
-            updateMetadataCache(state, name);
-            return { name, ok: true };
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            logger.debug(`MCP: direct-tools bootstrap failed for ${name}: ${message}`);
-            return { name, ok: false };
-          }
-        },
-      );
-      const bootstrapped = bootstrapResults.filter(r => r.ok).map(r => r.name);
-      if (bootstrapped.length > 0 && ctx.hasUI) {
-        ctx.ui.notify(`MCP: direct tools for ${bootstrapped.join(", ")} will be available after restart`, "info");
-      }
-    }
   }
 
   lifecycle.setReconnectCallback((serverName) => {
